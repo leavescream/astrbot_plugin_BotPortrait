@@ -2,5 +2,5 @@ name: astrbot_plugin_BotPortrait
 display_name: BotPortrait - AI 自画像
 desc: "根据概率自动触发 ComfyUI 生成 AI 自画像。支持多人格独立配置（穿搭池、生图引擎参数、触发概率），内置每日穿搭模块，不依赖外部插件。"
 version: v1.0.0
-author: leavescream & Echo
-repo: ""
+author: leavescream
+repo: "https://github.com/leavescream/astrbot_plugin_BotPortrait"
