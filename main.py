@@ -151,19 +151,13 @@ class BotPortraitPlugin(Star):
             data_dir = StarTools.get_data_dir() / "astrbot_plugin_BotPortrait"
             data_dir.mkdir(parents=True, exist_ok=True)
 
-            pic_guide = self.config.get("pic_guide", "").strip()
-            if pic_guide:
-                logger.info(f"  翻译说明书已加载: {len(pic_guide)} 字符")
-            else:
-                logger.warning("  翻译说明书为空，未注入 pic_guide")
-            self._pic_guide_content = pic_guide
-
             try:
                 outfit_file = data_dir / "outfit_data.json"
                 self.outfit_data = OutfitDataManager(outfit_file)
                 pool = self.config.get("outfit_pool", [])
                 self.outfit_picker = OutfitPicker(self.outfit_data, pool)
-                self.outfit_generator = OutfitGenerator(self.context, self.outfit_data, pool, pic_guide)
+                # 穿搭生成器使用自己的内部规则（覆盖 _get_system_prompt），不依赖 pic_guide
+                self.outfit_generator = OutfitGenerator(self.context, self.outfit_data, pool, "")
                 logger.info("  穿搭系统初始化完成")
             except Exception as e:
                 logger.error(f"  穿搭系统初始化失败: {e}")
@@ -172,7 +166,7 @@ class BotPortraitPlugin(Star):
                 hairstyle_file = data_dir / "hairstyle_data.json"
                 self.hairstyle_data = HairstyleDataManager(hairstyle_file)
                 h_pool = self.config.get("hairstyle_pool", [])
-                self.hairstyle_generator = HairstyleGenerator(self.context, self.hairstyle_data, h_pool, pic_guide)
+                self.hairstyle_generator = HairstyleGenerator(self.context, self.hairstyle_data, h_pool, "")
                 logger.info("  发型系统初始化完成")
             except Exception as e:
                 logger.error(f"  发型系统初始化失败: {e}")
@@ -259,71 +253,78 @@ class BotPortraitPlugin(Star):
     # ============================================================
     # [生图核心] 构建 SD prompt → ComfyUI 渲染
     # ============================================================
-    # 中文动作描述 → 英文翻译映射（用于 take_selfie 传入的 action_desc）
-    _CN_ACTION_MAP = {
-        "双手在胸前比V字手势，歪头微笑": "both hands making V-signs in front of chest, tilting head with smile",
-        "右手托腮，目光看向侧方，若有所思的表情": "right hand on cheek, gazing to the side with thoughtful expression",
-        "双手叉腰，微微抬起下巴，自信的表情": "hands on hips, chin slightly lifted, confident expression",
-        "双手背在身后，身体微微前倾，好奇地歪头": "hands behind back, body leaning forward slightly, curious head tilt",
-        "右手比一个OK手势放在眼前，单眼wink": "making an OK gesture over one eye with right hand, single eye wink",
-        "双手轻轻捧脸，露出灿烂的笑容": "gently holding face with both hands, beaming bright smile",
-        "右手食指轻点下巴，歪头做思考状": "right index finger lightly touching chin, tilting head in thought",
-        "双手高举过头，做出欢呼的姿势，开心地笑着": "both arms raised high in cheer gesture, laughing happily",
-        "双臂交叉抱在胸前，面无表情地直视镜头": "arms crossed over chest, expressionless stare into camera",
-        "右手在脸侧比出小小的爱心手势，腼腆地微笑": "making a small heart gesture beside face with right hand, shy smile",
-        "双手合十放在胸前，微微低头，闭眼祈祷般的表情": "hands clasped together at chest, head slightly lowered, eyes closed like praying",
-        "左手叉腰，右手伸出食指指向侧方，挑眉坏笑": "left hand on hip, right index finger pointing sideways, raised eyebrow smirk",
-        "双手比V": "both hands making V-sign",
-        "歪头": "tilting head",
-        "微笑": "smiling",
-        "托腮": "hand on cheek",
-        "叉腰": "hands on hips",
-        "wink": "winking",
-        "闭眼": "eyes closed",
-        "双手合十": "hands clasped together",
-        "比心": "making heart gesture",
-        "挥手": "waving hand",
-        "叉手": "arms crossed",
-        "歪头微笑": "tilting head with smile",
-        "双手比V歪头微笑": "both hands making V-sign, tilting head with smile",
-        "双手撑脸歪头好奇打量": "resting face on hands, tilting head curiously observing",
-        "开心大笑": "laughing happily",
-        "自信表情": "confident expression",
-        "思考状": "thoughtful expression",
-        "双手高举": "both arms raised high",
-        "OK手势": "OK gesture",
-        "爱心手势": "heart gesture",
-        "食指指": "index finger pointing",
-        "挑眉": "raised eyebrow",
-        "直视镜头": "staring into camera",
-        "单眼wink": "single eye wink",
-        "双手抱胸": "arms crossed over chest",
-    }
-
-    @staticmethod
-    def _translate_action(text: str) -> str:
-        """将中文动作描述翻译为英文。先查映射表，再尝试通用清洗。"""
+    async def _translate_action(self, text: str, umo: str = "") -> str:
+        """LLM 翻译：将中文动作/场景描述翻译为英文 SD tags；英文直接透传。"""
         if not text:
             return ""
-        # 完整匹配优先
-        if text in BotPortraitPlugin._CN_ACTION_MAP:
-            return BotPortraitPlugin._CN_ACTION_MAP[text]
-        # 尝试逐词/短语匹配
-        for cn, en in sorted(BotPortraitPlugin._CN_ACTION_MAP.items(), key=lambda x: -len(x[0])):
-            if cn in text:
-                text = text.replace(cn, en)
-        # 去除残留中文（通用清洗）
         import re
-        text = re.sub(r'[\u4e00-\u9fff]+', '', text).strip()
-        # 清洗多余空格和逗号
-        text = re.sub(r'\s*,\s*', ', ', text)
-        text = re.sub(r'\s{2,}', ' ', text)
-        return text.strip(", ")
+        # 不含中文 → 直接透传
+        if not re.search(r'[\u4e00-\u9fff]', text):
+            return text
+        # 含中文 → LLM 翻译
+        sid = f"botportrait_translate_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        try:
+            provider = await self._get_provider(umo)
+            if not provider:
+                logger.warning("[翻译] 无法获取 LLM provider，返回原文")
+                return text
+            prompt = (
+                "你是一个 Stable Diffusion 提示词翻译官。\n"
+                "将用户的中文场景/动作描述翻译为英文 SD tags，用逗号分隔。\n"
+                "只输出 tags，不要解释、不要包装、不要 markdown。\n"
+                f"中文：{text}\n英文："
+            )
+            resp = await provider.text_chat(
+                prompt=prompt,
+                system_prompt="You are a translator. Output only the translated SD tags, no explanations.",
+                session_id=sid,
+            )
+            result = self._extract_text(resp)
+            if result:
+                result = result.strip().strip(", ")
+                logger.info(f"[翻译] 成功: '{text[:40]}...' → '{result[:80]}...'")
+                return result
+            return text
+        except Exception as e:
+            logger.error(f"[翻译] LLM 调用异常: {e}")
+            return text
+        finally:
+            await self._cleanup_session(sid)
+
+    # ──────── LLM 辅助方法 ────────
+
+    async def _get_provider(self, umo: str = ""):
+        """获取 LLM provider。"""
+        if umo:
+            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+            if provider_id:
+                return self.context.get_provider_by_id(provider_id)
+        return self.context.get_using_provider()
+
+    async def _cleanup_session(self, sid: str):
+        """清理 LLM 会话。"""
+        try:
+            cid = await self.context.conversation_manager.get_curr_conversation_id(sid)
+            if cid:
+                await self.context.conversation_manager.delete_conversation(sid, cid)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _extract_text(resp) -> str:
+        """从 LLM 响应中提取文本。"""
+        if resp is None:
+            return ""
+        for key in ("completion_text", "completion", "text", "content"):
+            val = getattr(resp, key, None) or (resp.get(key) if isinstance(resp, dict) else None)
+            if val:
+                return str(val)
+        return str(resp) if resp else ""
 
     async def _generate_portrait(self, action_hint: str = "", umo: str = "", personality_key: str = "echo") -> Optional[str]:
         engine_cfg = self._get_engine_config(personality_key)
-        # 中文 → 英文翻译（ComfyUI 需要英文 prompt）
-        action_hint = self._translate_action(action_hint)
+        # LLM 翻译：中文 → 英文 SD tags
+        action_hint = await self._translate_action(action_hint, umo)
         outfit_tags = ""
         hairstyle_tags = ""
         today = self._get_effective_date()
@@ -396,7 +397,7 @@ class BotPortraitPlugin(Star):
         """艾可主动自拍一张自画像并发送到对话中。
 
         Args:
-            action_desc(str): 动作/表情描述，如'双手比V歪头微笑'。"""
+            action_desc(str): 动作/表情/场景描述，如'坐在窗边抱膝看暮色，眼神柔和'。支持中文，插件会自动翻译为英文 SD tags。"""
         if not self._enabled:
             return "自画像功能已关闭，请发送「开启自画像」打开"
         persona_id = await self._resolve_persona_id(event)
@@ -570,13 +571,14 @@ class BotPortraitPlugin(Star):
         if not reply_text:
             return
         try:
+            # 先解析人格 ID——sub_llm 需要按人格取 pic_guide
+            persona_id = await self._resolve_persona_id(event)
             # 子LLM分镜：分析回复内容产出 SD tags
-            sd_tags = await self._sub_llm_pic_director(reply_text)
+            sd_tags = await self._sub_llm_pic_director(reply_text, persona_id)
             if not sd_tags:
                 logger.debug("[BotPortrait] 子LLM未产出SD tags，跳过生图")
                 return
 
-            persona_id = await self._resolve_persona_id(event)
             matched_config = self._match_personality_config(persona_id) if persona_id else None
             personality_key = matched_config.get("personality_key", "echo") if matched_config else "echo"
             prob = self._get_personality_config("trigger_probability", 1.0, persona_id=persona_id)
@@ -614,9 +616,13 @@ class BotPortraitPlugin(Star):
             self._pending_action_tags = None
             self._pending_reply_text = None
 
-    async def _sub_llm_pic_director(self, reply_text: str) -> Optional[str]:
-        """子LLM分镜导演：用 pic_guide 规则分析回复，产出 SD tags"""
-        if not self._pic_guide_content:
+    async def _sub_llm_pic_director(self, reply_text: str, persona_id: Optional[str] = None) -> Optional[str]:
+        """子LLM分镜导演：用 pic_guide 规则分析回复，产出 SD tags
+        
+        按人格取 pic_guide，无配置时跳过分镜。
+        """
+        pic_guide = self._get_personality_config("pic_guide", "", persona_id=persona_id)
+        if not pic_guide:
             logger.warning("[BotPortrait] pic_guide 未配置，子LLM分镜跳过")
             return None
 
@@ -632,7 +638,7 @@ class BotPortraitPlugin(Star):
                 "你是一名自画像分镜导演。严格遵循以下分镜规则，分析用户的回复内容，"
                 f"输出一张自画像的 SD tags。{nl * 2}"
                 f"【分镜规则】{nl}"
-                f"{self._pic_guide_content}{nl * 2}"
+                f"{pic_guide}{nl * 2}"
                 "只输出 SD tags，不要多余的解释。"
             )
             resp = await provider.text_chat(
